@@ -7,5 +7,5 @@ def getVersionNumber():
 
 __version__ = getVersionNumber()
 
-from .register_maps import register_maps, ilk_from_numpy
+from .register_maps import register_maps, ilk_from_numpy, make_floatgrid, interpolate_maps
 from .prep_for_registration import prep_for_registration
