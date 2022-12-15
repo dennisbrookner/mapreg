@@ -5,7 +5,6 @@ Prep inputs for registration
 import argparse
 import shutil
 import subprocess
-import time
 import glob
 
 import reciprocalspaceship as rs
@@ -69,25 +68,27 @@ refinement {
         with open(eff, 'r') as file:
             eff_contents = file.read()
 
-    mtz = rs.read_mtz(path + mtzon)
-
     nickname = f"{mtzon.removesuffix('.mtz')}_rbr_to_{pdboff.removesuffix('.pdb')}"
-
+    
+    # check existing files because phenix doesn't like to overwrite things
     similar_files = glob.glob(f'{nickname}_[0-9]_1.*')
-
     if len(similar_files) == 0:
         nickname += '_0'
     else:
         n = max([int(s.split('_')[-2]) for s in similar_files])
         nickname += f'_{n+1}'
 
+
+    # read in mtz to access cell parameters and spacegroup
+    mtz = rs.read_mtz(path + mtzon)
+    cell_string = f"{mtz.cell.a} {mtz.cell.b} {mtz.cell.c} {mtz.cell.alpha} {mtz.cell.beta} {mtz.cell.gamma}"
+    sg = mtz.spacegroup.short_name()
+
     # edit refinement template
     eff = f"params_{nickname}.eff"
 
-    cell_string = f"{mtz.cell.a} {mtz.cell.b} {mtz.cell.c} {mtz.cell.alpha} {mtz.cell.beta} {mtz.cell.gamma}"
-
     params = {
-        "sg": mtz.spacegroup.short_name(),
+        "sg": sg,
         "cell_parameters": cell_string,
         "pdb_input": path + pdboff,
         "mtz_input": path + mtzon,
@@ -96,27 +97,35 @@ refinement {
     for key, value in params.items():
         eff_contents = eff_contents.replace(key, value)
 
+    # either add ligands to .eff file or delete "ligands" placeholder
     if ligands is not None:
         ligand_string = "\n".join([f"file_name = '{l}'" for l in ligands])
         eff_contents = eff_contents.replace("ligands", ligand_string)
     else:
         eff_contents = eff_contents.replace("ligands", "")
 
+    # write out customized .eff file for use by phenix
     with open(eff, "w") as file:
         file.write(eff_contents)
 
+    # confirm that phenix is active in the command-line environment
     if shutil.which("phenix.refine") is None:
         raise EnvironmentError(
             "Cannot find executable, phenix.refine. Please set up your phenix environment."
         )
 
+    # run refinement!
+    # print refinement output to terminal if user supplied the --verbose flag
     subprocess.run(
         f"phenix.refine {eff}",
         shell=True,
         capture_output=(not verbose),
     )
 
-    return f"{nickname}_1.mtz"
+    print(f"Ran phenix.refine and produced {nickname}_1.mtz")
+    print(f"Use this file as --mtzon for mapreg.register ")
+
+    return  
 
 
 def prep_for_registration(
@@ -154,7 +163,7 @@ def prep_for_registration(
     
     print(f"Running phenix.refine...")
 
-    mtzon = rigid_body_refine(
+    rigid_body_refine(
         mtzon=mtzon,
         pdboff=pdboff,
         path=path,
@@ -162,12 +171,6 @@ def prep_for_registration(
         eff=eff,
         verbose=verbose,
     )
-
-    print(f"Ran phenix.refine and produced {mtzon}")
-    print(f"Use this file as --mtzon for mapreg.register ")
-
-    # with open("rbr_output.txt", "x") as file:
-    #     file.write(mtzon)
 
     return
 

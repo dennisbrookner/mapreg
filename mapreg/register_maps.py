@@ -175,7 +175,6 @@ def register_maps(
     gaussian=False,
     spacing=0.25,
     dmin=None,
-    # spacegroup="P1", deprecating this option, always P1
     on_as_stationary=False,
     python_returns=False,
 ):
@@ -226,13 +225,15 @@ def register_maps(
         If False (default) write out map files and return nothing
 
     """
-    # check which mtz is higher resolution
+    
+    # check which mtz is lower resolution and pass that dmin to make_floatgrid
+    # user-supplied dmin overrides this
     if dmin is None:
         dmin = max(
             min(mtzoff.compute_dHKL(inplace=True).dHKL),
             min(mtzon.compute_dHKL(inplace=True).dHKL),
         )
-    # print(f"{dmin=}")
+    
     print("Constructing FloatGrids from mtzs...")
     fg_off = make_floatgrid(mtzoff, spacing, F=Foff, Phi=Phioff, spacegroup="P1", dmin=dmin)
     fg_on = make_floatgrid(mtzon, spacing, F=Fon, Phi=Phion, spacegroup="P1", dmin=dmin)
@@ -244,7 +245,6 @@ def register_maps(
 
     print("Performing optical flow - this may take up to ~10 minutes")
 
-    ######################################################################################
     # find the box around the input pdb
     # presumably, this is just the ASU, because the input pdb is in the true spacegroup (not P1)
     box = pdboff.calculate_box()
@@ -258,7 +258,6 @@ def register_maps(
     # pad the box by either 14 voxels or the input radius, whichever is larger
     pad = radius if radius > 14 else 14
     padded_bottom = [b - pad for b in true_bottom]
-    padded_top = [t + pad for t in true_top]
 
     grid_size = fg_off.shape
     abc = (fg_off.unit_cell.a, fg_off.unit_cell.b, fg_off.unit_cell.c)
@@ -269,14 +268,6 @@ def register_maps(
             true_bottom, true_top, grid_size, abc, box.maximum - box.minimum,
         )
     ]
-    ######################################################################################
-
-    # print(pdboff.cell)
-    # print(box.minimum)
-    # print(box.maximum)
-    # print(
-    #     f"{n=}\n {x=}\n {true_bottom=}\n {true_top=}\n {padded_bottom=}\n {padded_top=}\n {shape_for_padded_array=}\n {grid_size=}"
-    # )
 
     # extract the desired numpy arrays from the on and off FloatGrids
     padded_array_off = fg_off.get_subarray(
@@ -493,16 +484,6 @@ def parse_arguments():
         ),
     )
 
-    # parser.add_argument(
-    #     "--spacegroup",
-    #     required=False,
-    #     default="P1",
-    #     help=(
-    #         "Spacegroup into which real-space maps will be coerced. By default, P1. "
-    #         "Must be a valid call to the gemmi.UnitCell() constructor."
-    #     ),
-    # )
-
     return parser.parse_args()
 
 
@@ -532,7 +513,6 @@ def main():
         gaussian=args.gaussian,
         spacing=args.spacing,
         dmin=args.dmin,
-        # spacegroup=args.spacegroup,
         on_as_stationary=args.on_as_stationary,
         python_returns=False,
     )
