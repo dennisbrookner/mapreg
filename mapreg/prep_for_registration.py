@@ -6,6 +6,7 @@ import argparse
 import shutil
 import subprocess
 import time
+import glob
 
 import reciprocalspaceship as rs
 
@@ -36,10 +37,10 @@ refinement {
     }
   }
   output {
-    prefix = '''refine_nickname'''
+    prefix = '''nickname'''
     serial = 1
     serial_format = "%d"
-    job_title = '''nickname rigid body refinement'''
+    job_title = '''nickname'''
     write_def_file = False    
     write_eff_file = False
     write_geo_file = False
@@ -70,10 +71,18 @@ refinement {
 
     mtz = rs.read_mtz(path + mtzon)
 
-    nickname = f"reg{int(time.time())}" # this can be improved lol
+    nickname = f"{mtzon.removesuffix('.mtz')}_rbr_to_{pdboff.removesuffix('.pdb')}"
+
+    similar_files = glob.glob(f'{nickname}_[0-9]_1.*')
+
+    if len(similar_files) == 0:
+        nickname += '_0'
+    else:
+        n = max([int(s.split('_')[-2]) for s in similar_files])
+        nickname += f'_{n+1}'
 
     # edit refinement template
-    eff = f"refine_{nickname}.eff"
+    eff = f"params_{nickname}.eff"
 
     cell_string = f"{mtz.cell.a} {mtz.cell.b} {mtz.cell.c} {mtz.cell.alpha} {mtz.cell.beta} {mtz.cell.gamma}"
 
@@ -106,7 +115,7 @@ refinement {
         shell=True,
     )
 
-    return f"refine_{nickname}_1.mtz"
+    return f"{nickname}_1.mtz"
 
 
 def prep_for_registration(
@@ -150,8 +159,8 @@ def prep_for_registration(
 
     print(f"Ran phenix.refine and produced {mtzon}")
 
-    with open("rbr_output.txt", "x") as file:
-        file.write(mtzon)
+    # with open("rbr_output.txt", "x") as file:
+    #     file.write(mtzon)
 
     return
 

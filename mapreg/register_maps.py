@@ -14,7 +14,7 @@ from skimage.transform import warp
 from skimage.registration import optical_flow_ilk
 
 
-def make_floatgrid(mtz, spacing, F, Phi, spacegroup=None):
+def make_floatgrid(mtz, spacing, F, Phi, spacegroup='P1', dmin=None):
     """
     Make a gemmi.FloatGrid object from an rs.DataSet object
 
@@ -29,7 +29,9 @@ def make_floatgrid(mtz, spacing, F, Phi, spacegroup=None):
     Phi : str, optional
         Column in mtz containing phases to be used for calculation, by default "PH2FOFCWT"
     spacegroup : str, optional
-        Spacegroup for the output FloatGrid. If None (default), FloatGrid will inherit the spacegroup of mtz.
+        Spacegroup for the output FloatGrid. Defaults to P1. 
+    dmin: float, optional
+        Highest resolution reflections to include in Fourier transform. Defaults to None, no cutoff.
 
     Returns
     -------
@@ -45,10 +47,12 @@ def make_floatgrid(mtz, spacing, F, Phi, spacegroup=None):
 
     new_mtz.hkl_to_asu(inplace=True)
 
+    # apply user-provided resolution cutoff:
+    if dmin is not None:
+        new_mtz = new_mtz.compute_dHKL(inplace=True).loc[new_mtz.dHKL > dmin]
+
     # compute desired grid size based on given spacing
-    gridsize = []
-    for dim in [new_mtz.cell.a, new_mtz.cell.b, new_mtz.cell.c]:
-        gridsize.append(int(dim // spacing))
+    gridsize = [int(dim // spacing) for dim in (new_mtz.cell.a, new_mtz.cell.b, new_mtz.cell.c)]
 
     # perform FFT using the desired amplitudes and phases
     new_mtz["Fcomplex"] = new_mtz.to_structurefactor(F, Phi)
@@ -170,12 +174,13 @@ def register_maps(
     num_warp=5,
     gaussian=False,
     spacing=0.25,
-    spacegroup="P1",
+    dmin=None,
+    # spacegroup="P1", deprecating this option, always P1
     on_as_stationary=False,
     python_returns=False,
 ):
     """
-    Perform optical-flow-based map registration. Take in two mtz files, and return three map files corresponding to the first mtz,
+    Perform optical-flow-based map registration. Take in two mtzs, and create three map files corresponding to the first mtz,
     a registered version of the second mtz, and a difference map.
 
     Parameters
@@ -210,6 +215,9 @@ def register_maps(
         Optional argument to pass to optical_flow_ilk to use a gaussian kernel (True) or uniform kernel (False), by default False
     spacing : float, optional
         Approximate voxel size in Angstroms of the output maps, by default 0.25
+    dmin : float, optional
+        Highest-resolution reflections to include in Fourier transform for FloatGrid creation. 
+        If none, inputs will be truncated to be the same resolution
     on_as_stationary: bool, optional
         If True, register off data onto on data. Useful if ligands are modeled in on data
         If False (default) register on data onto off data.
@@ -218,9 +226,16 @@ def register_maps(
         If False (default) write out map files and return nothing
 
     """
+    # check which mtz is higher resolution
+    if dmin is None:
+        dmin = min(
+            min(mtzoff.compute_dHKL(inplace=True).dHKL),
+            min(mtzon.compute_dHKL(inplace=True).dHKL),
+        )
+    print(f"{dmin=}")
     print("Constructing FloatGrids from mtzs...")
-    fg_off = make_floatgrid(mtzoff, spacing, F=Foff, Phi=Phioff, spacegroup=spacegroup)
-    fg_on = make_floatgrid(mtzon, spacing, F=Fon, Phi=Phion, spacegroup=spacegroup)
+    fg_off = make_floatgrid(mtzoff, spacing, F=Foff, Phi=Phioff, spacegroup="P1", dmin=dmin)
+    fg_on = make_floatgrid(mtzon, spacing, F=Fon, Phi=Phion, spacegroup="P1", dmin=dmin)
     print("Constructed FloatGrids from mtzs")
 
     print("Interpolating 'on' grid onto 'off' grid frame...")
@@ -229,30 +244,48 @@ def register_maps(
 
     print("Performing optical flow - this may take up to ~10 minutes")
 
-    # this is where bounding box stuff is computed
-    # this code chunk needs operate on fg_on_interpolated and fg_off, and output array_on and array_off
-
+    ######################################################################################
+    # find the box around the input pdb
+    # presumably, this is just the ASU, because the input pdb is in the true spacegroup (not P1)
     box = pdboff.calculate_box()
-    pad = 10  # e.g. a 2.5A-ish pad
 
+    # find the FloatGrid indices corresponding to the bottom and top corners of this box
     n = fg_off.get_nearest_point(box.minimum)
     x = fg_off.get_nearest_point(box.maximum)
-
     true_bottom = (n.u, n.v, n.w)
     true_top = (x.u, x.v, x.w)
 
+    # pad the box by 10 voxels, ~2.5 A (assuming default ~0.25 A spacing)
+    pad = 10
     padded_bottom = [b - pad for b in true_bottom]
     padded_top = [t + pad for t in true_top]
 
     grid_size = fg_off.shape
+    abc = (fg_off.unit_cell.a, fg_off.unit_cell.b, fg_off.unit_cell.c)
 
+    # this glorious list comprehension handles the desired periodic wrapping
+    # shape_for_padded_array = [
+    #     pt - pb if tt - tb > 10 else pt - pb + s
+    #     for tb, tt, pb, pt, s in zip(
+    #         true_bottom, true_top, padded_bottom, padded_top, grid_size
+    #     )
+    # ]
     shape_for_padded_array = [
-        pt - pb if tt > tb else pt - pb + s
-        for tb, tt, pb, pt, s in zip(true_bottom, true_top, padded_bottom, padded_top, grid_size)
+        t - b + 2 * pad + g * ((m > a) + (t < b))
+        for (b, t, g, a, m) in zip(
+            true_bottom, true_top, grid_size, abc, box.maximum - box.minimum,
+        )
     ]
+    ######################################################################################
 
-    print(f"{n=}\n {x=}\n {true_bottom=}\n {true_top=}\n {padded_bottom=}\n {padded_top=}\n {shape_for_padded_array=}")
+    print(pdboff.cell)
+    print(box.minimum)
+    print(box.maximum)
+    print(
+        f"{n=}\n {x=}\n {true_bottom=}\n {true_top=}\n {padded_bottom=}\n {padded_top=}\n {shape_for_padded_array=}\n {grid_size=}"
+    )
 
+    # extract the desired numpy arrays from the on and off FloatGrids
     padded_array_off = fg_off.get_subarray(
         start=[*padded_bottom], shape=[*shape_for_padded_array]
     )
@@ -260,9 +293,9 @@ def register_maps(
         start=[*padded_bottom], shape=[*shape_for_padded_array]
     )
 
-    # array_off = fg_off.array
-    # array_on = fg_on_interpolated.array
-
+    # perform optical flow via the ilk_from_numpy helper function
+    # overwrite either padded_array_off or padded_array_on with the registered version
+    # depending on the desired stationary map
     if on_as_stationary:
         padded_array_off, flow = ilk_from_numpy(
             ref=padded_array_on,
@@ -271,7 +304,6 @@ def register_maps(
             num_warp=num_warp,
             gaussian=gaussian,
         )
-
     else:
         padded_array_on, flow = ilk_from_numpy(
             ref=padded_array_off,
@@ -283,24 +315,53 @@ def register_maps(
 
     print("Performed optical flow")
 
-    # return array_on, array_off to correct places in fg_on_interpolated, fg_off
+    # unpad arrays
+    # the outer part of these arrays is garbage anyway, because optical flow has issues at boundaries
+    # NOTE: is there an optical flow algorithm that handles periodic boundaries? Not that I know of, but would be nice...
     array_off = padded_array_off[pad:-pad, pad:-pad, pad:-pad]
     array_on = padded_array_on[pad:-pad, pad:-pad, pad:-pad]
 
-    print(f"{array_off.shape=}\n {array_on.shape=}\n {padded_array_off.shape=}\n {padded_array_on.shape=}")
+    print(
+        f"{array_off.shape=}\n {array_on.shape=}\n {padded_array_off.shape=}\n {padded_array_on.shape=}"
+    )
 
+    # return array_on, array_off to correct places in fg_on_interpolated, fg_off
     fg_off.set_subarray(array_off, start=[*true_bottom])
     fg_on_interpolated.set_subarray(array_on, start=[*true_bottom])
 
+    # populate fg_diff with only the difference between the registered arrays and 0s elsewhere
     fg_diff = fg_off.clone()
     fg_diff.fill(0)
     fg_diff.set_subarray(array_on - array_off, start=[*true_bottom])
 
+    # exit early and return to python
     if python_returns:
         return (fg_on_interpolated, fg_off, flow, true_bottom)
 
+    # maps in P1 with alpha=beta=gamma=90 are assumed by coot to be EM maps and do not render periodicity
+    # hacky workaround until this is fixed: make alpha 90.006 degrees instead
+    if all(
+        [
+            angle == 90
+            for angle in (
+                fg_off.unit_cell.alpha,
+                fg_off.unit_cell.beta,
+                fg_off.unit_cell.gamma,
+            )
+        ]
+    ):
+        fg_off.unit_cell = gemmi.UnitCell(
+            fg_off.unit_cell.a,
+            fg_off.unit_cell.b,
+            fg_off.unit_cell.c,
+            90.006,
+            fg_off.unit_cell.beta,
+            fg_off.unit_cell.gamma,
+        )
+
+    # write out off, on, and difference maps
     rs.io.write_ccp4_map(
-        fg_off.array, f"{path}{mapnameoff}.map", fg_off.unit_cell, fg_off.spacegroup
+        fg_off.array, f"{path}/{mapnameoff}.map", fg_off.unit_cell, fg_off.spacegroup
     )
     rs.io.write_ccp4_map(
         fg_on_interpolated.array,
@@ -428,14 +489,24 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--spacegroup",
+        "--dmin",
         required=False,
-        default="P1",
+        type=float,
+        default=None,
         help=(
-            "Spacegroup into which real-space maps will be coerced. By default, P1. "
-            "Must be a valid call to the gemmi.UnitCell() constructor."
+            "Highest-resolution (in Angstroms) reflections to include in Fourier transform for FloatGrid creation. By default, no cutoff. "
         ),
     )
+
+    # parser.add_argument(
+    #     "--spacegroup",
+    #     required=False,
+    #     default="P1",
+    #     help=(
+    #         "Spacegroup into which real-space maps will be coerced. By default, P1. "
+    #         "Must be a valid call to the gemmi.UnitCell() constructor."
+    #     ),
+    # )
 
     return parser.parse_args()
 
@@ -465,7 +536,8 @@ def main():
         num_warp=args.num_warp,
         gaussian=args.gaussian,
         spacing=args.spacing,
-        spacegroup=args.spacegroup,
+        dmin=args.dmin,
+        # spacegroup=args.spacegroup,
         on_as_stationary=args.on_as_stationary,
         python_returns=False,
     )
