@@ -389,7 +389,7 @@ def parse_arguments():
         metavar=("mtzfileoff", "Foff", "Phioff"),
         required=True,
         help=(
-            "Reference mtz representing off/apo/ground/dark state"
+            "Reference mtz representing off/apo/ground/dark/wild-type state"
             "Specified as (filename, F, Phi)"
         ),
     )
@@ -401,7 +401,7 @@ def parse_arguments():
         metavar=("mtzfileon", "Fon", "Phion"),
         required=True,
         help=(
-            "mtz representing the on/bound/excited/bright state"
+            "mtz representing the on/bound/excited/bright/mutant state"
             "Specified as (filename, F, Phi)"
         ),
     )
