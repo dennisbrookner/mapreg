@@ -14,7 +14,7 @@ from skimage.transform import warp
 from skimage.registration import optical_flow_ilk
 
 
-def make_floatgrid(mtz, spacing, F, Phi, spacegroup=None):
+def make_floatgrid(mtz, spacing, F, Phi, spacegroup='P1', dmin=None):
     """
     Make a gemmi.FloatGrid object from an rs.DataSet object
 
@@ -29,7 +29,9 @@ def make_floatgrid(mtz, spacing, F, Phi, spacegroup=None):
     Phi : str, optional
         Column in mtz containing phases to be used for calculation, by default "PH2FOFCWT"
     spacegroup : str, optional
-        Spacegroup for the output FloatGrid. If None (default), FloatGrid will inherit the spacegroup of mtz.
+        Spacegroup for the output FloatGrid. Defaults to P1. 
+    dmin: float, optional
+        Highest resolution reflections to include in Fourier transform. Defaults to None, no cutoff.
 
     Returns
     -------
@@ -45,10 +47,12 @@ def make_floatgrid(mtz, spacing, F, Phi, spacegroup=None):
 
     new_mtz.hkl_to_asu(inplace=True)
 
+    # apply user-provided resolution cutoff:
+    if dmin is not None:
+        new_mtz = new_mtz.compute_dHKL(inplace=True).loc[new_mtz.dHKL > dmin]
+
     # compute desired grid size based on given spacing
-    gridsize = []
-    for dim in [new_mtz.cell.a, new_mtz.cell.b, new_mtz.cell.c]:
-        gridsize.append(int(dim // spacing))
+    gridsize = [int(dim // spacing) for dim in (new_mtz.cell.a, new_mtz.cell.b, new_mtz.cell.c)]
 
     # perform FFT using the desired amplitudes and phases
     new_mtz["Fcomplex"] = new_mtz.to_structurefactor(F, Phi)
@@ -105,10 +109,7 @@ def interpolate_maps(fgoff, fgon):
             for c in range(gridsize[2]):
                 (
                     fgon_interp.set_value(
-                        a,
-                        b,
-                        c,
-                        fgon.interpolate_value(fgoff.get_position(a, b, c)),
+                        a, b, c, fgon.interpolate_value(fgoff.get_position(a, b, c)),
                     )
                 )
 
@@ -160,6 +161,7 @@ def ilk_from_numpy(ref, mov, **kwargs):
 def register_maps(
     mtzoff,
     mtzon,
+    pdboff,
     mapnameoff,
     mapnameon,
     diffmapname,
@@ -172,12 +174,12 @@ def register_maps(
     num_warp=5,
     gaussian=False,
     spacing=0.25,
-    spacegroup="P1",
+    dmin=None,
     on_as_stationary=False,
     python_returns=False,
 ):
     """
-    Perform optical-flow-based map registration. Take in two mtz files, and return three map files corresponding to the first mtz,
+    Perform optical-flow-based map registration. Take in two mtzs, and create three map files corresponding to the first mtz,
     a registered version of the second mtz, and a difference map.
 
     Parameters
@@ -186,6 +188,8 @@ def register_maps(
         input mtz representing the off/apo/ground/dark state
     mtzon : rs.DataSet
         input mtz representing the on/bound/excited/bright state
+    pdboff : gemmi.Structure
+        input pdb used to find the bounding box on which registration is performed
     mapnameoff : str
         Name of output map containing off/apo/ground/dark data
     mapnameon : str
@@ -210,17 +214,29 @@ def register_maps(
         Optional argument to pass to optical_flow_ilk to use a gaussian kernel (True) or uniform kernel (False), by default False
     spacing : float, optional
         Approximate voxel size in Angstroms of the output maps, by default 0.25
+    dmin : float, optional
+        Highest-resolution reflections to include in Fourier transform for FloatGrid creation. 
+        If none, inputs will be truncated to be the same resolution
     on_as_stationary: bool, optional
         If True, register off data onto on data. Useful if ligands are modeled in on data
         If False (default) register on data onto off data.
     python_returns : bool, optional
-        If True, return a 3-tuple of the static FloatGrid, the moved numpy array, and the registration flow. Do not write out maps.
+        If True, return a 4-tuple of the off FloatGrid, on FloatGrid, registration flow, and bottom corner of the protein model. Do not write out maps.
         If False (default) write out map files and return nothing
 
     """
+    
+    # check which mtz is lower resolution and pass that dmin to make_floatgrid
+    # user-supplied dmin overrides this
+    if dmin is None:
+        dmin = max(
+            min(mtzoff.compute_dHKL(inplace=True).dHKL),
+            min(mtzon.compute_dHKL(inplace=True).dHKL),
+        )
+    
     print("Constructing FloatGrids from mtzs...")
-    fg_off = make_floatgrid(mtzoff, spacing, F=Foff, Phi=Phioff, spacegroup=spacegroup)
-    fg_on = make_floatgrid(mtzon, spacing, F=Fon, Phi=Phion, spacegroup=spacegroup)
+    fg_off = make_floatgrid(mtzoff, spacing, F=Foff, Phi=Phioff, spacegroup="P1", dmin=dmin)
+    fg_on = make_floatgrid(mtzon, spacing, F=Fon, Phi=Phion, spacegroup="P1", dmin=dmin)
     print("Constructed FloatGrids from mtzs")
 
     print("Interpolating 'on' grid onto 'off' grid frame...")
@@ -229,48 +245,119 @@ def register_maps(
 
     print("Performing optical flow - this may take up to ~10 minutes")
 
-    array_off = fg_off.array
-    array_on = fg_on_interpolated.array
+    # find the box around the input pdb
+    # presumably, this is just the ASU, because the input pdb is in the true spacegroup (not P1)
+    box = pdboff.calculate_box()
 
+    # find the FloatGrid indices corresponding to the bottom and top corners of this box
+    n = fg_off.get_nearest_point(box.minimum)
+    x = fg_off.get_nearest_point(box.maximum)
+    true_bottom = (n.u, n.v, n.w)
+    true_top = (x.u, x.v, x.w)
+
+    # pad the box by either 14 voxels or the input radius, whichever is larger
+    pad = radius if radius > 14 else 14
+    padded_bottom = [b - pad for b in true_bottom]
+
+    grid_size = fg_off.shape
+    abc = (fg_off.unit_cell.a, fg_off.unit_cell.b, fg_off.unit_cell.c)
+
+    shape_for_padded_array = [
+        t - b + 2 * pad + g * ((m > a) + (t < b))
+        for (b, t, g, a, m) in zip(
+            true_bottom, true_top, grid_size, abc, box.maximum - box.minimum,
+        )
+    ]
+
+    # extract the desired numpy arrays from the on and off FloatGrids
+    padded_array_off = fg_off.get_subarray(
+        start=[*padded_bottom], shape=[*shape_for_padded_array]
+    )
+    padded_array_on = fg_on_interpolated.get_subarray(
+        start=[*padded_bottom], shape=[*shape_for_padded_array]
+    )
+
+    # perform optical flow via the ilk_from_numpy helper function
+    # overwrite either padded_array_off or padded_array_on with the registered version
+    # depending on the desired stationary map
     if on_as_stationary:
-        array_off, flow = ilk_from_numpy(
-            ref=array_on,
-            mov=array_off,
+        padded_array_off, flow = ilk_from_numpy(
+            ref=padded_array_on,
+            mov=padded_array_off,
             radius=radius,
             num_warp=num_warp,
             gaussian=gaussian,
         )
-
-        if python_returns:
-            return (fg_on, array_off, flow)
-
-        out_cell = fg_on.unit_cell
-        out_sg = fg_on.spacegroup
-
     else:
-        array_on, flow = ilk_from_numpy(
-            ref=array_off,
-            mov=array_on,
+        padded_array_on, flow = ilk_from_numpy(
+            ref=padded_array_off,
+            mov=padded_array_on,
             radius=radius,
             num_warp=num_warp,
             gaussian=gaussian,
         )
-
-        if python_returns:
-            return (fg_off, array_on, flow)
-
-        out_cell = fg_off.unit_cell
-        out_sg = fg_off.spacegroup
 
     print("Performed optical flow")
 
-    rs.io.write_ccp4_map(array_off, f"{path}{mapnameoff}.map", out_cell, out_sg)
+    # unpad arrays
+    # the outer part of these arrays is garbage anyway, because optical flow has issues at boundaries
+    # NOTE: is there an optical flow algorithm that handles periodic boundaries? Not that I know of, but would be nice...
+    array_off = padded_array_off[pad:-pad, pad:-pad, pad:-pad]
+    array_on = padded_array_on[pad:-pad, pad:-pad, pad:-pad]
 
-    rs.io.write_ccp4_map(array_on, f"{path}/{mapnameon}.map", out_cell, out_sg)
-
-    rs.io.write_ccp4_map(
-        array_on - array_off, f"{path}/{diffmapname}.map", out_cell, out_sg
+    print(
+        f"{array_off.shape=}\n {array_on.shape=}\n {padded_array_off.shape=}\n {padded_array_on.shape=}"
     )
+
+    # return array_on, array_off to correct places in fg_on_interpolated, fg_off
+    fg_off.set_subarray(array_off, start=[*true_bottom])
+    fg_on_interpolated.set_subarray(array_on, start=[*true_bottom])
+
+    # populate fg_diff with only the difference between the registered arrays and 0s elsewhere
+    fg_diff = fg_off.clone()
+    fg_diff.fill(0)
+    fg_diff.set_subarray(array_on - array_off, start=[*true_bottom])
+
+    # exit early and return to python
+    if python_returns:
+        return (fg_on_interpolated, fg_off, flow, true_bottom)
+
+    # maps in P1 with alpha=beta=gamma=90 are assumed by coot to be EM maps and do not render periodicity
+    # hacky workaround until this is fixed: make alpha 90.006 degrees instead
+    if all(
+        [
+            angle == 90
+            for angle in (
+                fg_off.unit_cell.alpha,
+                fg_off.unit_cell.beta,
+                fg_off.unit_cell.gamma,
+            )
+        ]
+    ):
+        fg_off.unit_cell = gemmi.UnitCell(
+            fg_off.unit_cell.a,
+            fg_off.unit_cell.b,
+            fg_off.unit_cell.c,
+            90.006,
+            fg_off.unit_cell.beta,
+            fg_off.unit_cell.gamma,
+        )
+
+    # write out off, on, and difference maps
+    rs.io.write_ccp4_map(
+        fg_off.array, f"{path}/{mapnameoff}.map", fg_off.unit_cell, fg_off.spacegroup
+    )
+    rs.io.write_ccp4_map(
+        fg_on_interpolated.array,
+        f"{path}/{mapnameon}.map",
+        fg_off.unit_cell,
+        fg_off.spacegroup,
+    )
+    rs.io.write_ccp4_map(
+        fg_diff.array, f"{path}/{diffmapname}.map", fg_off.unit_cell, fg_off.spacegroup,
+    )
+
+    np.save(f"{path}/{mapnameon}_flow.npy", flow)
     print("Wrote map files")
     return
 
@@ -286,7 +373,7 @@ def parse_arguments():
         metavar=("mtzfileoff", "Foff", "Phioff"),
         required=True,
         help=(
-            "Reference mtz representing off/apo/ground/dark state"
+            "Reference mtz representing off/apo/ground/dark/wild-type state"
             "Specified as (filename, F, Phi)"
         ),
     )
@@ -298,8 +385,19 @@ def parse_arguments():
         metavar=("mtzfileon", "Fon", "Phion"),
         required=True,
         help=(
-            "mtz representing the on/bound/excited/bright state" 
+            "mtz representing the on/bound/excited/bright/mutant state"
             "Specified as (filename, F, Phi)"
+        ),
+    )
+
+    parser.add_argument(
+        "--pdboff",
+        "-p",
+        required=True,
+        help=(
+            "Reference pdb corresponding to the off/apo/ground/dark state. "
+            "Map registration will be performed on the region containing protein "
+            "as per calling gemmi's pdb.calculate_box() on this pdb."
         ),
     )
 
@@ -315,7 +413,7 @@ def parse_arguments():
     parser.add_argument(
         "--on-as-stationary",
         required=False,
-        action='store_true',
+        action="store_true",
         default=False,
         help="Include this flag to register 'off' onto 'on' (instead of 'on' onto 'off', the default)",
     )
@@ -377,12 +475,12 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--spacegroup",
+        "--dmin",
         required=False,
-        default="P1",
+        type=float,
+        default=None,
         help=(
-            "Spacegroup into which real-space maps will be coerced. By default, P1. "
-            "Must be a valid call to the gemmi.UnitCell() constructor."
+            "Highest-resolution (in Angstroms) reflections to include in Fourier transform for FloatGrid creation. By default, no cutoff. "
         ),
     )
 
@@ -393,14 +491,17 @@ def main():
 
     args = parse_arguments()
 
+    # only read from file in the command-line function, not the python function
     mtzoff = rs.read_mtz(args.path + args.mtzoff[0])
     mtzon = rs.read_mtz(args.path + args.mtzon[0])
+    pdboff = gemmi.read_structure(args.path + args.pdboff)
 
     register_maps(
         mtzoff=mtzoff,
-        mtzon =mtzon ,
+        mtzon=mtzon,
+        pdboff=pdboff,
         mapnameoff=args.mapnames[0],
-        mapnameon =args.mapnames[1],
+        mapnameon=args.mapnames[1],
         diffmapname=args.mapnames[2],
         path=args.path,
         Foff=args.mtzoff[1],
@@ -411,11 +512,11 @@ def main():
         num_warp=args.num_warp,
         gaussian=args.gaussian,
         spacing=args.spacing,
-        spacegroup=args.spacegroup,
+        dmin=args.dmin,
         on_as_stationary=args.on_as_stationary,
         python_returns=False,
     )
-    
+
     return
 
 
