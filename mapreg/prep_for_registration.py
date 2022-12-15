@@ -11,7 +11,7 @@ import glob
 import reciprocalspaceship as rs
 
 
-def rigid_body_refine(mtzon, pdboff, path, ligands=None, eff=None):
+def rigid_body_refine(mtzon, pdboff, path, ligands=None, eff=None, verbose=False):
 
     if eff is None:
         eff_contents = """
@@ -113,6 +113,7 @@ refinement {
     subprocess.run(
         f"phenix.refine {eff}",
         shell=True,
+        capture_output=(not verbose),
     )
 
     return f"{nickname}_1.mtz"
@@ -128,36 +129,42 @@ def prep_for_registration(
     Fon="FP",
     SigFon="PHWT",
     path="./",
-    symop=None,
+    verbose=False,
+    # symop=None,
     eff=None
 ):
 
-    if symop is not None:
-        mon = rs.read_mtz(path + mtzon)
-        mon.apply_symop(symop, inplace=True)
-        mtzon = mtzon.removesuffix(".mtz") + "_reindexed" + ".mtz"
+    # if symop is not None:
+    #     mon = rs.read_mtz(path + mtzon)
+    #     mon.apply_symop(symop, inplace=True)
+    #     mtzon = mtzon.removesuffix(".mtz") + "_reindexed" + ".mtz"
 
-        mon.write_mtz(path + mtzon)
+    #     mon.write_mtz(path + mtzon)
 
     mtzon_scaled = mtzon.removesuffix(".mtz") + "_scaled" + ".mtz"
 
     subprocess.run(
         f"rs.scaleit -r {mtzoff} {Foff} {SigFoff} -i {mtzon} {Fon} {SigFon} -o {mtzon_scaled}",
         shell=True,
+        capture_output=(not verbose),
     )
     print(f"Ran scaleit and produced {mtzon_scaled}")
 
     mtzon = mtzon_scaled
+    
+    print(f"Running phenix.refine...")
 
     mtzon = rigid_body_refine(
         mtzon=mtzon,
         pdboff=pdboff,
         path=path,
         ligands=ligands,
-        eff=eff
+        eff=eff,
+        verbose=verbose,
     )
 
     print(f"Ran phenix.refine and produced {mtzon}")
+    print(f"Use this file as --mtzon for mapreg.register ")
 
     # with open("rbr_output.txt", "x") as file:
     #     file.write(mtzon)
@@ -225,17 +232,26 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--symop",
+        "--verbose",
+        "-v",
         required=False,
-        default=None,
-        help=("Symmetry operation for reindexing mtz2 to match mtz1"),
+        action="store_true",
+        default="False",
+        help="Include this flag to print out scaleit and phenix.refine outputs to the terminal",
     )
+
+    # parser.add_argument(
+    #     "--symop",
+    #     required=False,
+    #     default=None,
+    #     help=("Symmetry operation for reindexing mtz2 to match mtz1"),
+    # )
 
     parser.add_argument(
         "--eff",
         required=False,
         default=None,
-        help=("Custom .eff file for running phenix.refine "),
+        help=("Custom .eff file for running phenix.refine. "),
     )
 
     return parser.parse_args()
@@ -255,7 +271,8 @@ def main():
         Fon=args.mtzon[1],
         SigFon=args.mtzon[2],
         path=args.path,
-        symop=args.symop,
+        verbose=args.verbose,
+        # symop=args.symop,
         eff=args.eff
     )
 
