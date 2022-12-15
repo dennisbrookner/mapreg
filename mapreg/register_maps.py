@@ -372,6 +372,8 @@ def register_maps(
     rs.io.write_ccp4_map(
         fg_diff.array, f"{path}/{diffmapname}.map", fg_off.unit_cell, fg_off.spacegroup,
     )
+
+    np.save(f"{path}/{mapnameon}_flow.npy", flow)
     print("Wrote map files")
     return
 
