@@ -228,7 +228,7 @@ def register_maps(
     """
     # check which mtz is higher resolution
     if dmin is None:
-        dmin = min(
+        dmin = max(
             min(mtzoff.compute_dHKL(inplace=True).dHKL),
             min(mtzon.compute_dHKL(inplace=True).dHKL),
         )
