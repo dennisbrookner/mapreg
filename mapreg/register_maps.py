@@ -232,7 +232,7 @@ def register_maps(
             min(mtzoff.compute_dHKL(inplace=True).dHKL),
             min(mtzon.compute_dHKL(inplace=True).dHKL),
         )
-    print(f"{dmin=}")
+    # print(f"{dmin=}")
     print("Constructing FloatGrids from mtzs...")
     fg_off = make_floatgrid(mtzoff, spacing, F=Foff, Phi=Phioff, spacegroup="P1", dmin=dmin)
     fg_on = make_floatgrid(mtzon, spacing, F=Fon, Phi=Phion, spacegroup="P1", dmin=dmin)
@@ -255,21 +255,14 @@ def register_maps(
     true_bottom = (n.u, n.v, n.w)
     true_top = (x.u, x.v, x.w)
 
-    # pad the box by 10 voxels, ~2.5 A (assuming default ~0.25 A spacing)
-    pad = 10
+    # pad the box by either 14 voxels or the input radius, whichever is larger
+    pad = radius if radius > 14 else 14
     padded_bottom = [b - pad for b in true_bottom]
     padded_top = [t + pad for t in true_top]
 
     grid_size = fg_off.shape
     abc = (fg_off.unit_cell.a, fg_off.unit_cell.b, fg_off.unit_cell.c)
 
-    # this glorious list comprehension handles the desired periodic wrapping
-    # shape_for_padded_array = [
-    #     pt - pb if tt - tb > 10 else pt - pb + s
-    #     for tb, tt, pb, pt, s in zip(
-    #         true_bottom, true_top, padded_bottom, padded_top, grid_size
-    #     )
-    # ]
     shape_for_padded_array = [
         t - b + 2 * pad + g * ((m > a) + (t < b))
         for (b, t, g, a, m) in zip(
@@ -278,12 +271,12 @@ def register_maps(
     ]
     ######################################################################################
 
-    print(pdboff.cell)
-    print(box.minimum)
-    print(box.maximum)
-    print(
-        f"{n=}\n {x=}\n {true_bottom=}\n {true_top=}\n {padded_bottom=}\n {padded_top=}\n {shape_for_padded_array=}\n {grid_size=}"
-    )
+    # print(pdboff.cell)
+    # print(box.minimum)
+    # print(box.maximum)
+    # print(
+    #     f"{n=}\n {x=}\n {true_bottom=}\n {true_top=}\n {padded_bottom=}\n {padded_top=}\n {shape_for_padded_array=}\n {grid_size=}"
+    # )
 
     # extract the desired numpy arrays from the on and off FloatGrids
     padded_array_off = fg_off.get_subarray(
