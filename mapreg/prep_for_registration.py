@@ -8,9 +8,10 @@ import subprocess
 import glob
 
 import reciprocalspaceship as rs
+import gemmi
 
 
-def rigid_body_refine(mtzon, pdboff, path, ligands=None, eff=None, verbose=False):
+def rigid_body_refine(mtzon, pdboff, path, ligands=None, eff=None, verbose=False, selection=None):
 
     if eff is None:
         eff_contents = """
@@ -94,6 +95,10 @@ refinement {
         "mtz_input": path + mtzon,
         "nickname": nickname,
     }
+    
+    if selection is not None:
+        params['all'] = selection # overwrite atom selection
+    
     for key, value in params.items():
         eff_contents = eff_contents.replace(key, value)
 
@@ -128,6 +133,44 @@ refinement {
     return  
 
 
+def handle_special_positions(pdboff, path):
+    """
+    Check if any waters happen to sit on special positions, and if so, remove them.
+    If any non-water atoms sit on special positions, throw a (hopefully helpful) error.
+
+    Parameters
+    ----------
+    pdboff : str
+        name of input pdb
+    path : str
+        Relative in/out path for files
+    """
+    pdb = gemmi.read_structure(path + pdboff)
+    
+    # gemmi pdb heirarchy is nonsense, but this is what we've got
+    for model in pdb:
+        for chain in model:
+            for residue in chain:
+                for atom in residue:
+                    
+                    # check if atom is within 0.5 A of a special position
+                    # returns a number > 0 if so
+                    if pdb.cell.is_special_position(atom.pos, max_dist=0.5) > 0: 
+                        if residue.is_water():
+                            print('Input model contains water at special position. Removing water so as to not break rigid-body refinement.')
+                            print('If it is important that you keep this water and just omit it from your refinement selection, use the --selection flag')
+                            residue.remove_atom(name=atom.name, altloc=atom.altloc, el=atom.element)
+                            
+                        else:
+                            raise ValueError("""
+Input model contains a non-water atom on a special position. 
+Please use the --selection flag to supply an input suitable for rigid-body refinement by phenix. 
+""")
+    
+    
+    return pdboff
+
+
 def prep_for_registration(
     pdboff,
     mtzoff,
@@ -139,6 +182,7 @@ def prep_for_registration(
     SigFon="PHWT",
     path="./",
     verbose=False,
+    selection=None,
     # symop=None,
     eff=None
 ):
@@ -158,6 +202,8 @@ def prep_for_registration(
         capture_output=(not verbose),
     )
     print(f"Ran scaleit and produced {mtzon_scaled}")
+    
+    pdboff = handle_special_positions()
 
     mtzon = mtzon_scaled
     
@@ -170,6 +216,7 @@ def prep_for_registration(
         ligands=ligands,
         eff=eff,
         verbose=verbose,
+        selection=selection,
     )
 
     return
@@ -249,6 +296,14 @@ def parse_arguments():
     #     default=None,
     #     help=("Symmetry operation for reindexing mtz2 to match mtz1"),
     # )
+    
+    parser.add_argument(
+        "--selection",
+        required=False,
+        default=None,
+        help=("Argument to phenix.refine's refinement.refine.sites.rigid_body. "
+              "Use this flag if atoms on special positions need to be omitted from the atom selection. "),
+    )
 
     parser.add_argument(
         "--eff",
@@ -276,6 +331,7 @@ def main():
         path=args.path,
         verbose=args.verbose,
         # symop=args.symop,
+        selection=args.selection,
         eff=args.eff
     )
 
