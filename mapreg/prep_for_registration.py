@@ -5,12 +5,12 @@ Prep inputs for registration
 import argparse
 import shutil
 import subprocess
-import time
+import glob
 
 import reciprocalspaceship as rs
 
 
-def rigid_body_refine(mtzon, pdboff, path, ligands=None, eff=None):
+def rigid_body_refine(mtzon, pdboff, path, ligands=None, eff=None, verbose=False):
 
     if eff is None:
         eff_contents = """
@@ -36,10 +36,10 @@ refinement {
     }
   }
   output {
-    prefix = '''refine_nickname'''
+    prefix = '''nickname'''
     serial = 1
     serial_format = "%d"
-    job_title = '''nickname rigid body refinement'''
+    job_title = '''nickname'''
     write_def_file = False    
     write_eff_file = False
     write_geo_file = False
@@ -68,17 +68,27 @@ refinement {
         with open(eff, 'r') as file:
             eff_contents = file.read()
 
-    mtz = rs.read_mtz(path + mtzon)
+    nickname = f"{mtzon.removesuffix('.mtz')}_rbr_to_{pdboff.removesuffix('.pdb')}"
+    
+    # check existing files because phenix doesn't like to overwrite things
+    similar_files = glob.glob(f'{nickname}_[0-9]_1.*')
+    if len(similar_files) == 0:
+        nickname += '_0'
+    else:
+        n = max([int(s.split('_')[-2]) for s in similar_files])
+        nickname += f'_{n+1}'
 
-    nickname = f"reg{int(time.time())}" # this can be improved lol
+
+    # read in mtz to access cell parameters and spacegroup
+    mtz = rs.read_mtz(path + mtzon)
+    cell_string = f"{mtz.cell.a} {mtz.cell.b} {mtz.cell.c} {mtz.cell.alpha} {mtz.cell.beta} {mtz.cell.gamma}"
+    sg = mtz.spacegroup.short_name()
 
     # edit refinement template
-    eff = f"refine_{nickname}.eff"
-
-    cell_string = f"{mtz.cell.a} {mtz.cell.b} {mtz.cell.c} {mtz.cell.alpha} {mtz.cell.beta} {mtz.cell.gamma}"
+    eff = f"params_{nickname}.eff"
 
     params = {
-        "sg": mtz.spacegroup.short_name(),
+        "sg": sg,
         "cell_parameters": cell_string,
         "pdb_input": path + pdboff,
         "mtz_input": path + mtzon,
@@ -87,26 +97,35 @@ refinement {
     for key, value in params.items():
         eff_contents = eff_contents.replace(key, value)
 
+    # either add ligands to .eff file or delete "ligands" placeholder
     if ligands is not None:
         ligand_string = "\n".join([f"file_name = '{l}'" for l in ligands])
         eff_contents = eff_contents.replace("ligands", ligand_string)
     else:
         eff_contents = eff_contents.replace("ligands", "")
 
+    # write out customized .eff file for use by phenix
     with open(eff, "w") as file:
         file.write(eff_contents)
 
+    # confirm that phenix is active in the command-line environment
     if shutil.which("phenix.refine") is None:
         raise EnvironmentError(
             "Cannot find executable, phenix.refine. Please set up your phenix environment."
         )
 
+    # run refinement!
+    # print refinement output to terminal if user supplied the --verbose flag
     subprocess.run(
         f"phenix.refine {eff}",
         shell=True,
+        capture_output=(not verbose),
     )
 
-    return f"refine_{nickname}_1.mtz"
+    print(f"Ran phenix.refine and produced {nickname}_1.mtz")
+    print(f"Use this file as --mtzon for mapreg.register ")
+
+    return  
 
 
 def prep_for_registration(
@@ -119,39 +138,39 @@ def prep_for_registration(
     Fon="FP",
     SigFon="PHWT",
     path="./",
-    symop=None,
+    verbose=False,
+    # symop=None,
     eff=None
 ):
 
-    if symop is not None:
-        mon = rs.read_mtz(path + mtzon)
-        mon.apply_symop(symop, inplace=True)
-        mtzon = mtzon.removesuffix(".mtz") + "_reindexed" + ".mtz"
+    # if symop is not None:
+    #     mon = rs.read_mtz(path + mtzon)
+    #     mon.apply_symop(symop, inplace=True)
+    #     mtzon = mtzon.removesuffix(".mtz") + "_reindexed" + ".mtz"
 
-        mon.write_mtz(path + mtzon)
+    #     mon.write_mtz(path + mtzon)
 
     mtzon_scaled = mtzon.removesuffix(".mtz") + "_scaled" + ".mtz"
 
     subprocess.run(
         f"rs.scaleit -r {mtzoff} {Foff} {SigFoff} -i {mtzon} {Fon} {SigFon} -o {mtzon_scaled}",
         shell=True,
+        capture_output=(not verbose),
     )
     print(f"Ran scaleit and produced {mtzon_scaled}")
 
     mtzon = mtzon_scaled
+    
+    print(f"Running phenix.refine...")
 
-    mtzon = rigid_body_refine(
+    rigid_body_refine(
         mtzon=mtzon,
         pdboff=pdboff,
         path=path,
         ligands=ligands,
-        eff=eff
+        eff=eff,
+        verbose=verbose,
     )
-
-    print(f"Ran phenix.refine and produced {mtzon}")
-
-    with open("rbr_output.txt", "x") as file:
-        file.write(mtzon)
 
     return
 
@@ -216,17 +235,26 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        "--symop",
+        "--verbose",
+        "-v",
         required=False,
-        default=None,
-        help=("Symmetry operation for reindexing mtz2 to match mtz1"),
+        action="store_true",
+        default="False",
+        help="Include this flag to print out scaleit and phenix.refine outputs to the terminal",
     )
+
+    # parser.add_argument(
+    #     "--symop",
+    #     required=False,
+    #     default=None,
+    #     help=("Symmetry operation for reindexing mtz2 to match mtz1"),
+    # )
 
     parser.add_argument(
         "--eff",
         required=False,
         default=None,
-        help=("Custom .eff file for running phenix.refine "),
+        help=("Custom .eff file for running phenix.refine. "),
     )
 
     return parser.parse_args()
@@ -246,7 +274,8 @@ def main():
         Fon=args.mtzon[1],
         SigFon=args.mtzon[2],
         path=args.path,
-        symop=args.symop,
+        verbose=args.verbose,
+        # symop=args.symop,
         eff=args.eff
     )
 
