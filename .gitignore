@@ -1,4 +1,5 @@
 mapreg.egg-info/
 mapreg.egg-info/*
 */__pycache__/*
+dist/
 dist/*
